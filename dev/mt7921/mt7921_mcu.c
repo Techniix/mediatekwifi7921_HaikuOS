@@ -867,11 +867,13 @@ mt7921_mcu_run_firmware(struct mt7921_softc* sc)
 /* #pragma mark - MAC / radio setup (milestone 5) */
 
 
-/* Channels we tell the firmware about; same as mt7921_net.c. */
-static const uint8_t mt7921_fw_chan_2ghz[] =
-	{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
-static const uint8_t mt7921_fw_chan_5ghz[] =
-	{ 36, 40, 44, 48, 149, 153, 157, 161, 165 };
+/* Channels we tell the firmware about; same lists as mt7921_net.c. */
+static const uint8_t mt7921_fw_chan_2ghz[] = MT7921_CHANS_2GHZ;
+static const uint8_t mt7921_fw_chan_5ghz[] = MT7921_CHANS_5GHZ;
+
+/* Linux ieee80211_channel_flags, which the firmware takes as is. */
+#define MT7921_FW_CHAN_NO_IR	(1U << 1)
+#define MT7921_FW_CHAN_RADAR	(1U << 3)
 
 
 /* Port of mt792x_mac_init_band(). */
@@ -912,7 +914,7 @@ int
 mt7921_mcu_init_mac(struct mt7921_softc* sc)
 {
 	struct mt7921_mcu* mcu = sc->sc_mcu;
-	uint8_t buf[12 + 8 * 32];
+	uint8_t buf[12 + 8 * 48];
 	int ret, i, n;
 
 	/* mt7921_mcu_set_eeprom(): use the on-chip efuse. */
@@ -953,8 +955,12 @@ mt7921_mcu_init_mac(struct mt7921_softc* sc)
 	n = 12;
 	for (i = 0; i < (int)nitems(mt7921_fw_chan_2ghz); i++, n += 8)
 		put_le16(buf + n, mt7921_fw_chan_2ghz[i]);	/* flags 0 */
-	for (i = 0; i < (int)nitems(mt7921_fw_chan_5ghz); i++, n += 8)
+	for (i = 0; i < (int)nitems(mt7921_fw_chan_5ghz); i++, n += 8) {
 		put_le16(buf + n, mt7921_fw_chan_5ghz[i]);
+		if (MT7921_CHAN_IS_DFS(mt7921_fw_chan_5ghz[i]))
+			put_le32(buf + n + 4,
+				MT7921_FW_CHAN_NO_IR | MT7921_FW_CHAN_RADAR);
+	}
 	buf[8] = nitems(mt7921_fw_chan_2ghz);
 	buf[9] = nitems(mt7921_fw_chan_5ghz);
 	buf[10] = 0;

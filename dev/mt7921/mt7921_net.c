@@ -44,15 +44,12 @@
 
 
 /*
- * Conservative channel list for now: 2.4 GHz channels 1-11 and the 5 GHz
- * channels that need no radar detection (UNII-1 and UNII-3). Proper
- * regulatory handling (CLC / country code from firmware) comes later.
- * Keep in sync with mt7921_fw_chan_* in mt7921_mcu.c.
+ * 2.4 GHz channels 1-11 and the 5 GHz UNII-1/2/2e/3 channels. The DFS
+ * ones (UNII-2/2e) are marked passive. Proper regulatory handling (CLC /
+ * country code from firmware) comes later.
  */
-static const uint8_t mt7921_chan_2ghz[] =
-	{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
-static const uint8_t mt7921_chan_5ghz[] =
-	{ 36, 40, 44, 48, 149, 153, 157, 161, 165 };
+static const uint8_t mt7921_chan_2ghz[] = MT7921_CHANS_2GHZ;
+static const uint8_t mt7921_chan_5ghz[] = MT7921_CHANS_5GHZ;
 
 #define MT7921_SCAN_TIMEOUT_MS	10000
 #define MT7921_TX_DATA_MAX	(2048 - 64)	/* slot minus TXD + TXP */
@@ -76,6 +73,7 @@ mt7921_getradiocaps(struct ieee80211com* ic, int maxchans, int* nchans,
 	struct ieee80211_channel chans[])
 {
 	uint8_t bands[IEEE80211_MODE_BYTES];
+	int i;
 
 	memset(bands, 0, sizeof(bands));
 	setbit(bands, IEEE80211_MODE_11B);
@@ -87,6 +85,13 @@ mt7921_getradiocaps(struct ieee80211com* ic, int maxchans, int* nchans,
 	setbit(bands, IEEE80211_MODE_11A);
 	ieee80211_add_channel_list_5ghz(chans, maxchans, nchans,
 		mt7921_chan_5ghz, nitems(mt7921_chan_5ghz), bands, 0);
+
+	/* No transmitting on radar channels until an AP has been heard. */
+	for (i = 0; i < *nchans; i++) {
+		if (IEEE80211_IS_CHAN_5GHZ(&chans[i])
+			&& MT7921_CHAN_IS_DFS(chans[i].ic_ieee))
+			chans[i].ic_flags |= IEEE80211_CHAN_PASSIVE | IEEE80211_CHAN_DFS;
+	}
 }
 
 

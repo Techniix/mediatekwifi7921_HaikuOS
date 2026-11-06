@@ -55,6 +55,17 @@ enum {
 	MT7921_STAGE_MAX = MT7921_STAGE_CONNECT
 };
 
+/*
+ * Channel lists, shared by net80211 (mt7921_net.c) and the firmware
+ * channel domain (mt7921_mcu.c). 5 GHz 52-144 are DFS: listen only, the
+ * station never transmits there before it hears an access point.
+ */
+#define MT7921_CHANS_2GHZ	{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }
+#define MT7921_CHANS_5GHZ	{ 36, 40, 44, 48, 52, 56, 60, 64, \
+	100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, \
+	149, 153, 157, 161, 165 }
+#define MT7921_CHAN_IS_DFS(c)	((c) >= 52 && (c) <= 144)
+
 #define MT7921_TX_SLOTS		64	/* data TX ring size; also token space */
 
 /* Hardware DMA descriptor, 16 bytes, little endian (mt76/dma.h). */
