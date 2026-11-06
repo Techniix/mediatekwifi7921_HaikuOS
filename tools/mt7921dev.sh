@@ -10,6 +10,7 @@
 #   enable       link the driver into dev/net (loads at next boot)
 #   disable      remove that link (driver stays installed)
 #   stage [N]    show or set the bring-up stage (1-6)
+#   ht [on|off]  show or set 802.11n (off = legacy rates, as in 0.1.0)
 #   firmware     check that the firmware files are in place
 #   log [N]      show the last N (default 60) driver lines from the syslog
 #   status       show what is installed and enabled
@@ -32,6 +33,21 @@ SETTINGS=$HOME/config/settings/kernel/drivers/$NAME
 BUILT=$HAIKU_GENERATED/objects/haiku/$ARCH/release/add-ons/kernel/drivers/network/wlan/$NAME/$NAME
 
 die() { echo "error: $*" >&2; exit 1; }
+
+# set_key KEY VALUE: replace (or add) one line in the settings file.
+set_key() {
+	mkdir -p "$(dirname "$SETTINGS")"
+	touch "$SETTINGS"
+	grep -v "^$1 " "$SETTINGS" > "$SETTINGS.tmp" || true
+	echo "$1 $2" >> "$SETTINGS.tmp"
+	mv "$SETTINGS.tmp" "$SETTINGS"
+}
+
+show_settings() {
+	if [ -s "$SETTINGS" ]; then cat "$SETTINGS"; fi
+	grep -q "^stage " "$SETTINGS" 2>/dev/null || echo "stage 6 (default)"
+	grep -q "^ht " "$SETTINGS" 2>/dev/null || echo "ht on (default)"
+}
 
 case "$1" in
 build)
@@ -58,10 +74,16 @@ disable)
 stage)
 	if [ -n "$2" ]; then
 		case "$2" in [1-6]) ;; *) die "stage must be 1-6" ;; esac
-		mkdir -p "$(dirname "$SETTINGS")"
-		echo "stage $2" > "$SETTINGS"
+		set_key stage "$2"
 	fi
-	if [ -f "$SETTINGS" ]; then cat "$SETTINGS"; else echo "stage 6 (default)"; fi
+	show_settings
+	;;
+ht)
+	if [ -n "$2" ]; then
+		case "$2" in on|off) ;; *) die "ht must be on or off" ;; esac
+		set_key ht "$2"
+	fi
+	show_settings
 	;;
 firmware)
 	ok=1
@@ -87,10 +109,10 @@ log)
 status)
 	[ -f "$BIN_DIR/$NAME" ] && ls -l "$BIN_DIR/$NAME" || echo "not installed"
 	[ -L "$LINK_DIR/$NAME" ] && echo "enabled" || echo "not enabled"
-	"$0" stage
+	show_settings
 	;;
 *)
-	sed -n '5,17p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '5,18p' "$0" | sed 's/^# \{0,1\}//'
 	exit 1
 	;;
 esac

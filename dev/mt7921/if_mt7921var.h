@@ -115,6 +115,14 @@ struct mt7921_sta_info {
 	uint8_t		state;		/* MT7921_STA_STATE_* */
 	bool		enable;
 	bool		newly;
+	bool		qos;		/* WME negotiated */
+	/* 802.11n, valid when ht is set (20 MHz only for now). */
+	bool		ht;
+	uint16_t	ht_cap;		/* AP's HT capability info, masked */
+	uint8_t		ampdu_factor;	/* max A-MPDU length exponent */
+	uint8_t		ampdu_density;	/* min MPDU start spacing */
+	bool		smps_dynamic;
+	uint8_t		mcs_mask[10];	/* HT MCS the AP can receive */
 };
 #define MT7921_STA_STATE_NONE	0
 #define MT7921_STA_STATE_AUTH	1
@@ -128,6 +136,16 @@ struct mt7921_bss_info {
 	uint16_t	beacon_int;
 	uint8_t		dtim_period;
 	bool		enable;
+	bool		qos;
+	bool		ht;
+};
+
+/* One access category's EDCA parameters, in mt76's order (BK, BE, VI, VO). */
+struct mt7921_edca {
+	uint16_t	cw_min;		/* 2^n - 1, as mac80211 passes it */
+	uint16_t	cw_max;
+	uint16_t	txop;		/* units of 32 us */
+	uint16_t	aifs;
 };
 
 struct mt7921_scan_target {
@@ -215,6 +233,17 @@ struct mt7921_softc {
 	int			sc_txfree_logged;
 	uint32_t		sc_tx_frames;
 	uint32_t		sc_tx_failed;
+
+	/* 802.11n (settings: "ht off" disables it). */
+	bool			sc_ht;
+	int			(*sc_ampdu_rx_start)(struct ieee80211_node*,
+				    struct ieee80211_rx_ampdu*, int, int, int);
+	void			(*sc_ampdu_rx_stop)(struct ieee80211_node*,
+				    struct ieee80211_rx_ampdu*);
+	struct task		sc_ba_task;
+	struct task		sc_wme_task;
+	uint16_t		sc_ba_stop;	/* TIDs whose BA the task removes */
+	uint16_t		sc_ba_active;	/* TIDs with a BA in firmware */
 };
 
 #define MT7921_LOCK_INIT(sc) \
@@ -274,6 +303,10 @@ int		mt7921_mcu_bss_update(struct mt7921_softc*,
 int		mt7921_mcu_set_roc(struct mt7921_softc*, uint8_t channel,
 		    bool is_5ghz, uint32_t duration_ms);
 int		mt7921_mcu_abort_roc(struct mt7921_softc*);
+int		mt7921_mcu_rx_ba(struct mt7921_softc*, const uint8_t addr[6],
+		    int tid, uint16_t ssn, uint16_t winsize, bool enable);
+int		mt7921_mcu_set_edca(struct mt7921_softc*,
+		    const struct mt7921_edca edca[4], bool qos);
 void		mt7921_mcu_poll_locked(struct mt7921_softc*);
 
 /* mt7921_net.c */
@@ -293,5 +326,6 @@ void		mt7921_hw_resume(struct mt7921_softc*);
 /* glue.c */
 int		mt7921_haiku_get_stage(void);
 bool		mt7921_haiku_shutting_down(void);
+bool		mt7921_haiku_ht_enabled(void);
 
 #endif /* _IF_MT7921VAR_H_ */

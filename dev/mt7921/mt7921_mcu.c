@@ -52,6 +52,7 @@
 #define MCU_CE_CMD_START_HW_SCAN	0x03
 #define MCU_CE_CMD_SET_CHAN_DOMAIN	0x0f
 #define MCU_CE_CMD_CANCEL_HW_SCAN	0x1b
+#define MCU_CE_CMD_SET_EDCA_PARMS	0x1d
 #define MCU_EXT_CMD_EFUSE_BUFFER_MODE	0x21
 #define MCU_EXT_CMD_MAC_INIT_CTRL	0x46
 #define MCU_EXT_CMD_SET_RX_PATH		0x4e
@@ -876,6 +877,14 @@ static const uint8_t mt7921_fw_chan_5ghz[] = MT7921_CHANS_5GHZ;
 #define MT7921_FW_CHAN_RADAR	(1U << 3)
 
 
+/*
+ * Largest MPDU the MAC accepts. Upstream keeps 1536 because it lets the
+ * hardware split A-MSDUs; that is off here, so with 802.11n the whole
+ * A-MSDU (up to 3839 bytes plus header and CCMP) has to fit.
+ */
+#define MT7921_MAX_RX_LEN(sc)	((sc)->sc_ht ? 3904 : 1536)
+
+
 /* Port of mt792x_mac_init_band(). */
 static void
 mt7921_mac_init_band(struct mt7921_softc* sc, int band)
@@ -890,7 +899,8 @@ mt7921_mac_init_band(struct mt7921_softc* sc, int band)
 
 	mt7921_set(sc, MT_MIB_SCR1(band), MT_MIB_TXDUR_EN | MT_MIB_RXDUR_EN);
 
-	mt7921_rmw(sc, MT_DMA_DCR0(band), MT_DMA_DCR0_MAX_RX_LEN, 1536 << 3);
+	mt7921_rmw(sc, MT_DMA_DCR0(band), MT_DMA_DCR0_MAX_RX_LEN,
+		MT7921_MAX_RX_LEN(sc) << 3);
 	/* disable rx rate report by default due to hw issues */
 	mt7921_clear(sc, MT_DMA_DCR0(band), MT_DMA_DCR0_RXD_G5_EN);
 
@@ -930,7 +940,8 @@ mt7921_mcu_init_mac(struct mt7921_softc* sc)
 	}
 
 	/* mt7921_mac_init() */
-	mt7921_rmw(sc, MT_MDP_DCR1, MT_MDP_DCR1_MAX_RX_LEN, 1536 << 3);
+	mt7921_rmw(sc, MT_MDP_DCR1, MT_MDP_DCR1_MAX_RX_LEN,
+		MT7921_MAX_RX_LEN(sc) << 3);
 	mt7921_mac_init_band(sc, 0);
 	mt7921_mac_init_band(sc, 1);
 
@@ -1229,6 +1240,59 @@ struct mt7921_sta_rec_state {
 	uint8_t		rsv[1];
 } __packed;
 
+struct mt7921_sta_rec_ht {
+	uint16_t	tag;
+	uint16_t	len;
+	uint16_t	ht_cap;
+	uint16_t	rsv;
+} __packed;
+
+struct mt7921_sta_rec_ba {
+	uint16_t	tag;
+	uint16_t	len;
+	uint8_t		tid;
+	uint8_t		ba_type;
+	uint8_t		amsdu;
+	uint8_t		ba_en;
+	uint16_t	ssn;
+	uint16_t	winsize;
+} __packed;
+
+struct mt7921_wtbl_ht {
+	uint16_t	tag;
+	uint16_t	len;
+	uint8_t		ht;
+	uint8_t		ldpc;
+	uint8_t		af;
+	uint8_t		mm;
+	uint8_t		rsv[4];
+} __packed;
+
+struct mt7921_wtbl_smps {
+	uint16_t	tag;
+	uint16_t	len;
+	uint8_t		smps;
+	uint8_t		rsv[3];
+} __packed;
+
+struct mt7921_wtbl_ba {
+	uint16_t	tag;
+	uint16_t	len;
+	uint8_t		tid;
+	uint8_t		ba_type;
+	uint8_t		rsv0[2];
+	uint16_t	sn;
+	uint8_t		ba_en;
+	uint8_t		ba_winsize_idx;
+	uint16_t	ba_winsize;
+	uint8_t		peer_addr[6];
+	uint8_t		rst_ba_tid;
+	uint8_t		rst_ba_sel;
+	uint8_t		rst_ba_sb;
+	uint8_t		band_idx;
+	uint8_t		rsv1[4];
+} __packed;
+
 struct mt7921_wtbl_req_hdr {
 	uint8_t		wlan_idx_lo;
 	uint8_t		operation;
@@ -1274,13 +1338,21 @@ struct mt7921_wtbl_hdr_trans {
 /* Tags (mt76_connac_mcu.h enums). */
 #define STA_REC_BASIC			0x00
 #define STA_REC_RA			0x01
+#define STA_REC_BA			0x06
 #define STA_REC_STATE			0x07
+#define STA_REC_HT			0x09
 #define STA_REC_WTBL			0x0d
 #define STA_REC_PHY			0x15
 #define WTBL_GENERIC			0x00
 #define WTBL_RX				0x01
+#define WTBL_HT				0x02
 #define WTBL_HDR_TRANS			0x06
+#define WTBL_BA				0x08
+#define WTBL_SMPS			0x0d
 #define WTBL_RESET_AND_SET		1
+#define WTBL_SET			2
+#define MT_BA_TYPE_RECIPIENT		2
+#define RST_BA_MAC_TID_MATCH		0
 #define UNI_BSS_INFO_BASIC		0
 #define UNI_BSS_INFO_RLM		2
 #define UNI_BSS_INFO_QBSS		15
@@ -1298,9 +1370,12 @@ struct mt7921_wtbl_hdr_trans {
 #define PHY_MODE_A			BIT(0)
 #define PHY_MODE_B			BIT(1)
 #define PHY_MODE_G			BIT(2)
+#define PHY_MODE_GN			BIT(3)
+#define PHY_MODE_AN			BIT(4)
 #define PHY_TYPE_BIT_HR_DSSS		BIT(0)
 #define PHY_TYPE_BIT_ERP		BIT(1)
 #define PHY_TYPE_BIT_OFDM		BIT(3)
+#define PHY_TYPE_BIT_HT			BIT(4)
 
 
 /* Minimal skb_put()-style builder for TLV messages. */
@@ -1352,7 +1427,7 @@ msg_add_tlv(struct mt7921_msg* m, int tag, int len, int ntlv_off, int wtbl_off)
 
 /*
  * Port of mt7921_mcu_sta_update() -> mt76_connac_mcu_sta_cmd() for the AP
- * of a legacy (non-HT) station interface, without hardware crypto.
+ * of a station interface (legacy or 802.11n), without hardware crypto.
  */
 int
 mt7921_mcu_sta_update(struct mt7921_softc* sc,
@@ -1387,20 +1462,32 @@ mt7921_mcu_sta_update(struct mt7921_softc* sc,
 	basic->conn_type = htole32(CONNECTION_INFRA_AP);
 	basic->aid = htole16(info->aid);
 	memcpy(basic->peer_addr, info->addr, 6);
-	basic->qos = 0;
+	basic->qos = info->qos;
 
 	if (info->enable) {
-		/* mt76_connac_mcu_sta_tlv(), legacy rates only */
+		/* mt76_connac_mcu_sta_tlv() */
 		struct mt7921_sta_rec_phy* phy;
 		struct mt7921_sta_rec_ra_info* ra;
 		struct mt7921_sta_rec_state* st;
 		uint16_t legacy;
 
+		if (info->ht) {
+			struct mt7921_sta_rec_ht* ht;
+
+			ht = msg_add_tlv(m, STA_REC_HT, sizeof(*ht), 0, -1);
+			ht->ht_cap = htole16(info->ht_cap);
+		}
+
 		phy = msg_add_tlv(m, STA_REC_PHY, sizeof(*phy), 0, -1);
 		phy->phy_type = info->is_5ghz ? PHY_TYPE_BIT_OFDM
 			: (PHY_TYPE_BIT_HR_DSSS | PHY_TYPE_BIT_ERP);
+		if (info->ht)
+			phy->phy_type |= PHY_TYPE_BIT_HT;
 		phy->basic_rate = htole16(info->basic_rates);
 		phy->rcpi = 220;		/* to_rcpi(0), as before averaging */
+		if (info->ht)
+			phy->ampdu = (info->ampdu_factor & 0x3)
+				| ((info->ampdu_density & 0x7) << 2);
 
 		ra = msg_add_tlv(m, STA_REC_RA, sizeof(*ra), 0, -1);
 		if (info->is_5ghz)
@@ -1409,6 +1496,9 @@ mt7921_mcu_sta_update(struct mt7921_softc* sc,
 			legacy = (((info->supp_rates >> 4) & 0xff) << 6)
 				| (info->supp_rates & 0xf);
 		ra->legacy = htole16(legacy);
+		if (info->ht)
+			memcpy(ra->rx_mcs_bitmask, info->mcs_mask,
+				sizeof(ra->rx_mcs_bitmask));
 
 		st = msg_add_tlv(m, STA_REC_STATE, sizeof(*st), 0, -1);
 		st->state = info->state;
@@ -1437,7 +1527,7 @@ mt7921_mcu_sta_update(struct mt7921_softc* sc,
 		gen->partial_aid = htole16(info->aid);
 		memcpy(gen->peer_addr, info->addr, 6);
 		gen->muar_idx = 0;
-		gen->qos = 0;
+		gen->qos = info->qos;
 
 		rx = msg_add_tlv(m, WTBL_RX, sizeof(*rx), whdr_off, wtbl_off);
 		rx->rca1 = 1;
@@ -1449,6 +1539,22 @@ mt7921_mcu_sta_update(struct mt7921_softc* sc,
 			wtbl_off);
 		htr->to_ds = 1;
 		htr->no_rx_trans = 1;
+
+		/* mt76_connac_mcu_wtbl_ht_tlv(), which includes the SMPS TLV */
+		if (info->ht) {
+			struct mt7921_wtbl_ht* wht;
+			struct mt7921_wtbl_smps* smps;
+
+			wht = msg_add_tlv(m, WTBL_HT, sizeof(*wht), whdr_off, wtbl_off);
+			wht->ht = 1;
+			wht->ldpc = (info->ht_cap & 0x0001) != 0;
+			wht->af = info->ampdu_factor;
+			wht->mm = info->ampdu_density;
+
+			smps = msg_add_tlv(m, WTBL_SMPS, sizeof(*smps), whdr_off,
+				wtbl_off);
+			smps->smps = info->smps_dynamic;
+		}
 	}
 
 	ret = mt7921_mcu_send(sc->sc_mcu, MCU_UNI_CMD(MCU_UNI_CMD_STA_REC_UPDATE),
@@ -1487,13 +1593,15 @@ mt7921_mcu_bss_update(struct mt7921_softc* sc,
 	put_le16(req + 26, bi->beacon_int);
 	req[28] = bi->dtim_period;
 	req[29] = bi->is_5ghz ? PHY_MODE_A : (PHY_MODE_B | PHY_MODE_G);
+	if (bi->ht)
+		req[29] |= bi->is_5ghz ? PHY_MODE_AN : PHY_MODE_GN;
 	put_le16(req + 30, MT7921_WCID_BSS);		/* sta_idx */
 	put_le16(req + 32, bi->is_5ghz ? PHY_TYPE_BIT_OFDM
 		: (PHY_TYPE_BIT_HR_DSSS | PHY_TYPE_BIT_ERP));	/* nonht_basic_phy */
 	/* struct mt76_connac_bss_qos_tlv */
 	put_le16(req + 36, UNI_BSS_INFO_QBSS);
 	put_le16(req + 38, 8);
-	req[40] = 0;					/* qos */
+	req[40] = bi->qos;				/* qos */
 
 	ret = mt7921_mcu_send(sc->sc_mcu, MCU_UNI_CMD(MCU_UNI_CMD_BSS_INFO_UPDATE),
 		req, sizeof(req), true);
@@ -1565,4 +1673,104 @@ mt7921_mcu_abort_roc(struct mt7921_softc* sc)
 	req[10] = 0xff;				/* dbdcband: auto */
 	return mt7921_mcu_send(sc->sc_mcu, MCU_UNI_CMD(MCU_UNI_CMD_ROC), req,
 		sizeof(req), false);
+}
+
+
+/*
+ * Port of mt7921_mcu_uni_rx_ba() -> mt76_connac_mcu_sta_ba(): tell the
+ * firmware we are the recipient of a block-ack session with the AP, so
+ * the hardware answers A-MPDUs with block acks. Reordering stays in
+ * net80211. Sends the WTBL part first, then the STA_REC part.
+ */
+int
+mt7921_mcu_rx_ba(struct mt7921_softc* sc, const uint8_t addr[6], int tid,
+	uint16_t ssn, uint16_t winsize, bool enable)
+{
+	struct mt7921_msg* m;
+	struct mt7921_sta_req_hdr* hdr;
+	struct mt7921_wtbl_req_hdr* whdr;
+	struct mt7921_wtbl_ba* wba;
+	struct mt7921_sta_rec_ba* ba;
+	int wtbl_off, whdr_off, ret;
+	const int wcid = MT7921_WCID_STA;
+
+	m = malloc(sizeof(*m), M_DEVBUF, M_WAITOK | M_ZERO);
+	if (m == NULL)
+		return ENOMEM;
+
+	hdr = msg_put(m, sizeof(*hdr));
+	hdr->is_tlv_append = 1;
+	hdr->wlan_idx_lo = wcid & 0xff;
+	hdr->wlan_idx_hi = (wcid >> 8) & 0x7;
+
+	wtbl_off = m->len;
+	msg_add_tlv(m, STA_REC_WTBL, sizeof(struct mt7921_tlv), 0, -1);
+	whdr_off = m->len;
+	whdr = msg_put(m, sizeof(*whdr));
+	whdr->operation = WTBL_SET;
+	whdr->wlan_idx_lo = wcid & 0xff;
+	whdr->wlan_idx_hi = (wcid >> 8) & 0x7;
+	{
+		struct mt7921_tlv* w = (struct mt7921_tlv*)(m->buf + wtbl_off);
+		w->len = htole16(le16toh(w->len) + sizeof(*whdr));
+	}
+
+	wba = msg_add_tlv(m, WTBL_BA, sizeof(*wba), whdr_off, wtbl_off);
+	wba->tid = tid;
+	wba->ba_type = MT_BA_TYPE_RECIPIENT;
+	memcpy(wba->peer_addr, addr, 6);
+	wba->rst_ba_tid = tid;
+	wba->rst_ba_sel = RST_BA_MAC_TID_MATCH;
+	wba->rst_ba_sb = 1;
+	wba->ba_winsize = htole16(enable ? winsize : 0);	/* connac2 */
+
+	ret = mt7921_mcu_send(sc->sc_mcu, MCU_UNI_CMD(MCU_UNI_CMD_STA_REC_UPDATE),
+		m->buf, m->len, true);
+	if (ret != 0)
+		goto out;
+
+	memset(m, 0, sizeof(*m));
+	hdr = msg_put(m, sizeof(*hdr));
+	hdr->is_tlv_append = 1;
+	hdr->wlan_idx_lo = wcid & 0xff;
+	hdr->wlan_idx_hi = (wcid >> 8) & 0x7;
+
+	ba = msg_add_tlv(m, STA_REC_BA, sizeof(*ba), 0, -1);
+	ba->ba_type = MT_BA_TYPE_RECIPIENT;
+	ba->winsize = htole16(winsize);
+	ba->ssn = htole16(ssn);
+	ba->ba_en = enable ? (uint8_t)(1 << tid) : 0;
+	ba->amsdu = 0;
+	ba->tid = tid;
+
+	ret = mt7921_mcu_send(sc->sc_mcu, MCU_UNI_CMD(MCU_UNI_CMD_STA_REC_UPDATE),
+		m->buf, m->len, true);
+out:
+	free(m, M_DEVBUF);
+	return ret;
+}
+
+
+/* Port of mt7921_mcu_set_tx(): EDCA parameters, BK/BE/VI/VO order. */
+int
+mt7921_mcu_set_edca(struct mt7921_softc* sc, const struct mt7921_edca edca[4],
+	bool qos)
+{
+	uint8_t req[4 * 10 + 4];
+	int i;
+
+	memset(req, 0, sizeof(req));
+	for (i = 0; i < 4; i++) {
+		uint8_t* e = req + 10 * i;
+		put_le16(e + 0, edca[i].cw_min ? edca[i].cw_min : 5);
+		put_le16(e + 2, edca[i].cw_max ? edca[i].cw_max : 10);
+		put_le16(e + 4, edca[i].txop);
+		put_le16(e + 6, edca[i].aifs);
+		/* guardtime, acm: 0 */
+	}
+	req[40] = 0;			/* bss_idx */
+	req[41] = qos;
+	req[42] = 0;			/* wmm_idx */
+	return mt7921_mcu_send(sc->sc_mcu, MCU_CE_CMD(MCU_CE_CMD_SET_EDCA_PARMS),
+		req, sizeof(req), false);
 }

@@ -571,9 +571,10 @@ mt7921_attach(device_t dev)
 	sc->sc_dev = dev;
 	sc->sc_chip = id->chip;
 	sc->sc_stage = mt7921_haiku_get_stage();
+	sc->sc_ht = mt7921_haiku_ht_enabled();
 	MT7921_LOCK_INIT(sc);
-	device_printf(dev, "bring-up stage %d of %d\n", sc->sc_stage,
-		MT7921_STAGE_MAX);
+	device_printf(dev, "bring-up stage %d of %d, 802.11n %s\n", sc->sc_stage,
+		MT7921_STAGE_MAX, sc->sc_ht ? "on" : "off");
 
 	if (sc->sc_chip == MT7921_CHIP_7922) {
 		sc->sc_fw_patch = MT7922_FW_PATCH;
