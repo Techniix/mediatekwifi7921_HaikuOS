@@ -25,17 +25,22 @@ MT7921 support uses the same code paths but is untested. Reports welcome.
 - Firmware-offloaded scanning, networks listed in Haiku's network menu
 - Joining open and **WPA2-PSK** networks (encryption in software by net80211)
 - DHCP, normal IP traffic
+- **802.11n** at 20 MHz, two streams (up to 144 Mbit/s), with receive
+  block-ack sessions and WME/QoS. Turn it off with `ht off` (see below).
+- 2.4 GHz channels 1–11 and 5 GHz 36–165, including the DFS channels
+  52–144 (listen-only until an access point is heard)
 - MSI interrupts; DMA is paused and bus mastering off while the interface is down
+- DMA is stopped as soon as Haiku starts shutting down or restarting
 
 ## Current limitations
 
-- **Legacy rates only (up to 54 Mbit/s).** No 802.11n/ac/ax yet.
-- **Channels:** 2.4 GHz 1–11, and 5 GHz 36–48 and 149–165 (no radar/DFS
-  channels). No country/regulatory data yet.
+- **No 40/80 MHz, 802.11ac or 802.11ax yet**, and no transmit aggregation,
+  so uploads are slower than downloads.
+- **No country/regulatory data yet**; the channel list is a fixed, US-safe one.
 - **Warm reboots:** Haiku has no driver shutdown hook, and a warm reboot does
-  not reset this chip, so its DMA can stay active across a reboot. The driver
-  stops leftover DMA as soon as it loads, but **prefer a full shutdown** over
-  a restart for now. See [docs/TESTING.md](docs/TESTING.md).
+  not reset this chip. The driver now watches for Haiku's shutdown and stops
+  DMA in time, and also stops leftover DMA when it loads. See
+  [docs/TESTING.md](docs/TESTING.md).
 - No power saving, no hardware crypto, no suspend/resume, no 6 GHz.
 
 ## Building
@@ -110,6 +115,9 @@ new hardware. Put `stage N` in
 | 4 | + interrupts, WiFi interface registered (radio hooks stubbed) |
 | 5 | + MAC/radio setup, scanning |
 | 6 | + transmit, joining networks (**default**) |
+
+The same file takes `ht off` to turn 802.11n off and run at legacy rates
+(up to 54 Mbit/s), as version 0.1.0 did. `tools/mt7921dev.sh ht off` sets it.
 
 ## Layout
 

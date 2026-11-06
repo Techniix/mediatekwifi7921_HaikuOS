@@ -44,15 +44,12 @@
 
 
 /*
- * Conservative channel list for now: 2.4 GHz channels 1-11 and the 5 GHz
- * channels that need no radar detection (UNII-1 and UNII-3). Proper
- * regulatory handling (CLC / country code from firmware) comes later.
- * Keep in sync with mt7921_fw_chan_* in mt7921_mcu.c.
+ * 2.4 GHz channels 1-11 and the 5 GHz UNII-1/2/2e/3 channels. The DFS
+ * ones (UNII-2/2e) are marked passive. Proper regulatory handling (CLC /
+ * country code from firmware) comes later.
  */
-static const uint8_t mt7921_chan_2ghz[] =
-	{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
-static const uint8_t mt7921_chan_5ghz[] =
-	{ 36, 40, 44, 48, 149, 153, 157, 161, 165 };
+static const uint8_t mt7921_chan_2ghz[] = MT7921_CHANS_2GHZ;
+static const uint8_t mt7921_chan_5ghz[] = MT7921_CHANS_5GHZ;
 
 #define MT7921_SCAN_TIMEOUT_MS	10000
 #define MT7921_TX_DATA_MAX	(2048 - 64)	/* slot minus TXD + TXP */
@@ -75,19 +72,36 @@ static void
 mt7921_getradiocaps(struct ieee80211com* ic, int maxchans, int* nchans,
 	struct ieee80211_channel chans[])
 {
+	struct mt7921_softc* sc = ic->ic_softc;
 	uint8_t bands[IEEE80211_MODE_BYTES];
+	int i;
 
+	/* HT20 only for now (cbw_flags 0): no 40 MHz channels yet. */
 	memset(bands, 0, sizeof(bands));
 	setbit(bands, IEEE80211_MODE_11B);
 	setbit(bands, IEEE80211_MODE_11G);
+	if (sc->sc_ht)
+		setbit(bands, IEEE80211_MODE_11NG);
 	ieee80211_add_channel_list_2ghz(chans, maxchans, nchans,
 		mt7921_chan_2ghz, nitems(mt7921_chan_2ghz), bands, 0);
 
 	memset(bands, 0, sizeof(bands));
 	setbit(bands, IEEE80211_MODE_11A);
+	if (sc->sc_ht)
+		setbit(bands, IEEE80211_MODE_11NA);
 	ieee80211_add_channel_list_5ghz(chans, maxchans, nchans,
 		mt7921_chan_5ghz, nitems(mt7921_chan_5ghz), bands, 0);
+
+	/* No transmitting on radar channels until an AP has been heard. */
+	for (i = 0; i < *nchans; i++) {
+		if (IEEE80211_IS_CHAN_5GHZ(&chans[i])
+			&& MT7921_CHAN_IS_DFS(chans[i].ic_ieee))
+			chans[i].ic_flags |= IEEE80211_CHAN_PASSIVE | IEEE80211_CHAN_DFS;
+	}
 }
+
+
+static void	mt7921_wme_apply(struct mt7921_softc*);
 
 
 /* #pragma mark - receive */
@@ -163,7 +177,7 @@ mt7921_rx_frame(struct mt7921_softc* sc, const uint8_t* data, int len)
 
 	hdr_gap = off + 2 * ((rxd2 >> MT_RXD2_NORMAL_HDR_OFFSET_SHIFT) & 0x3);
 	flen = len - hdr_gap;
-	if (flen < (int)sizeof(struct ieee80211_frame_min) || flen > MCLBYTES)
+	if (flen < (int)sizeof(struct ieee80211_frame_min) || flen > MJUMPAGESIZE)
 		goto drop;
 
 	chan = (rxd3 >> MT_RXD3_NORMAL_CH_FREQ_SHIFT) & 0xff;
@@ -179,7 +193,10 @@ mt7921_rx_frame(struct mt7921_softc* sc, const uint8_t* data, int len)
 			rssi = -100;
 	}
 
-	m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
+	if (flen <= MCLBYTES)
+		m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
+	else	/* an A-MSDU; net80211 splits it */
+		m = m_getjcl(M_NOWAIT, MT_DATA, M_PKTHDR, MJUMPAGESIZE);
 	if (m == NULL)
 		goto drop;
 	memcpy(mtod(m, uint8_t*), data + hdr_gap, flen);
@@ -464,7 +481,7 @@ mt7921_tx(struct mt7921_softc* sc, struct ieee80211_node* ni, struct mbuf* m)
 	struct ieee80211com* ic = &sc->sc_ic;
 	struct ieee80211_channel* chan;
 	struct ieee80211_frame* wh;
-	uint8_t type, subtype, fc_type, fc_stype, *buf;
+	uint8_t type, subtype, fc_type, fc_stype, tid, *buf;
 	uint32_t w[8];
 	bus_addr_t paddr;
 	int len, hdrlen, idx, wcid, q_idx, i;
@@ -500,8 +517,22 @@ mt7921_tx(struct mt7921_softc* sc, struct ieee80211_node* ni, struct mbuf* m)
 
 	wcid = sc->sc_sta_added && IEEE80211_ADDR_EQ(wh->i_addr1, sc->sc_bssid)
 		? MT7921_WCID_STA : MT7921_WCID_BSS;
-	/* Management/control: ALTX0. Data (no WME): BE = 3 - 2 = AC01. */
-	q_idx = type == IEEE80211_FC0_TYPE_DATA ? 1 : 0x10;
+	/*
+	 * Management/control: ALTX0. Data: the LMAC queue of its access
+	 * category (mt76_connac_lmac_mapping(): BK 0, BE 1, VI 2, VO 3).
+	 */
+	tid = 0;
+	if (type != IEEE80211_FC0_TYPE_DATA)
+		q_idx = 0x10;
+	else if (IEEE80211_QOS_HAS_SEQ(wh)) {
+		static const uint8_t lmac_q[WME_NUM_AC] = {
+			[WME_AC_BE] = 1, [WME_AC_BK] = 0,
+			[WME_AC_VI] = 2, [WME_AC_VO] = 3
+		};
+		tid = ieee80211_gettid(wh) & 0x7;
+		q_idx = lmac_q[TID_TO_WME_AC(tid)];
+	} else
+		q_idx = 1;
 
 	memset(w, 0, sizeof(w));
 	w[0] = ((uint32_t)(len + 32) & 0xffff)		/* TX_BYTES */
@@ -510,7 +541,8 @@ mt7921_tx(struct mt7921_softc* sc, struct ieee80211_node* ni, struct mbuf* m)
 	w[1] = BIT(31)					/* LONG_FORMAT */
 		| ((uint32_t)wcid & 0x3ff)		/* WLAN_IDX */
 		| (2U << 16)				/* HDR_FORMAT: 802.11 */
-		| ((uint32_t)(hdrlen / 2) << 11);	/* HDR_INFO */
+		| ((uint32_t)(hdrlen / 2) << 11)	/* HDR_INFO */
+		| ((uint32_t)tid << 20);		/* TID */
 	w[2] = ((uint32_t)fc_type << 4) | fc_stype
 		| (mcast ? BIT(10) : 0);
 	w[3] = 15U << 11;				/* REM_TX_COUNT */
@@ -598,6 +630,37 @@ mt7921_sta_info_from_node(struct ieee80211_node* ni, bool is_5ghz,
 }
 
 
+/*
+ * After association: QoS and the negotiated 802.11n parameters, roughly
+ * what mac80211 hands mt76 in sta->deflink.ht_cap.
+ */
+static void
+mt7921_sta_info_add_ht(struct mt7921_softc* sc, struct ieee80211_node* ni,
+	struct mt7921_sta_info* info)
+{
+	int i;
+
+	info->qos = (ni->ni_flags & IEEE80211_NODE_QOS) != 0;
+	if (!sc->sc_ht || (ni->ni_flags & IEEE80211_NODE_HT) == 0)
+		return;
+
+	info->ht = true;
+	/* 20 MHz only: drop the 40 MHz bits. */
+	info->ht_cap = ni->ni_htcap & (IEEE80211_HTCAP_LDPC | IEEE80211_HTCAP_SMPS
+		| IEEE80211_HTCAP_SHORTGI20 | IEEE80211_HTCAP_TXSTBC
+		| IEEE80211_HTCAP_RXSTBC);
+	info->ampdu_factor = ni->ni_htparam & IEEE80211_HTCAP_MAXRXAMPDU;
+	info->ampdu_density = (ni->ni_htparam & IEEE80211_HTCAP_MPDUDENSITY) >> 2;
+	info->smps_dynamic = (ni->ni_htcap & IEEE80211_HTCAP_SMPS)
+		== IEEE80211_HTCAP_SMPS_DYNAMIC;
+	for (i = 0; i < ni->ni_htrates.rs_nrates; i++) {
+		int mcs = ni->ni_htrates.rs_rates[i] & IEEE80211_RATE_VAL;
+		if (mcs < 8 * (int)sizeof(info->mcs_mask))
+			info->mcs_mask[mcs / 8] |= 1 << (mcs % 8);
+	}
+}
+
+
 /* Before authenticating: station record for the AP, then go to its channel. */
 static void
 mt7921_prepare_join(struct mt7921_softc* sc, struct ieee80211_node* ni)
@@ -674,6 +737,8 @@ mt7921_join_complete(struct mt7921_softc* sc, struct ieee80211_node* ni)
 	bi.beacon_int = ni->ni_intval;
 	bi.dtim_period = ni->ni_dtim_period;
 	bi.enable = true;
+	bi.qos = (ni->ni_flags & IEEE80211_NODE_QOS) != 0;
+	bi.ht = sc->sc_ht && (ni->ni_flags & IEEE80211_NODE_HT) != 0;
 	error = mt7921_mcu_bss_update(sc, &bi);
 	if (error != 0)
 		device_printf(sc->sc_dev, "BSS update failed (%d)\n", error);
@@ -687,6 +752,7 @@ mt7921_join_complete(struct mt7921_softc* sc, struct ieee80211_node* ni)
 	info.newly = false;
 	info.state = MT7921_STA_STATE_ASSOC;
 	info.aid = IEEE80211_NODE_AID(ni);
+	mt7921_sta_info_add_ht(sc, ni, &info);
 	error = mt7921_mcu_sta_update(sc, &info);
 	if (error != 0)
 		device_printf(sc->sc_dev, "station update failed (%d)\n", error);
@@ -696,8 +762,12 @@ mt7921_join_complete(struct mt7921_softc* sc, struct ieee80211_node* ni)
 		sc->sc_roc_active = false;
 	}
 
-	device_printf(sc->sc_dev, "associated with " MACFMT " (AID %d)\n",
-		MACARG(ni->ni_bssid), info.aid);
+	if (bi.qos)
+		mt7921_wme_apply(sc);
+
+	device_printf(sc->sc_dev, "associated with " MACFMT " (AID %d, %s%s)\n",
+		MACARG(ni->ni_bssid), info.aid,
+		info.ht ? "802.11n" : "legacy", info.qos ? ", QoS" : "");
 }
 
 
@@ -715,6 +785,12 @@ mt7921_leave(struct mt7921_softc* sc)
 	if (!sc->sc_sta_added)
 		return;
 
+	/* Removing the station record ends its block-ack sessions too. */
+	MT7921_LOCK(sc);
+	sc->sc_ba_active = 0;
+	sc->sc_ba_stop = 0;
+	MT7921_UNLOCK(sc);
+
 	memset(&info, 0, sizeof(info));
 	IEEE80211_ADDR_COPY(info.addr, sc->sc_bssid);
 	info.enable = false;
@@ -729,6 +805,141 @@ mt7921_leave(struct mt7921_softc* sc)
 
 	sc->sc_sta_added = false;
 	device_printf(sc->sc_dev, "left " MACFMT "\n", MACARG(sc->sc_bssid));
+}
+
+
+/* #pragma mark - 802.11n block ack and WME */
+
+
+/*
+ * The AP starts a block-ack session (ADDBA request). net80211 does the
+ * bookkeeping and reordering; the firmware has to send the block acks.
+ * Called from the receive path, with no locks held, so the MCU command is
+ * sent right away, before net80211 answers the AP.
+ */
+static int
+mt7921_ampdu_rx_start(struct ieee80211_node* ni, struct ieee80211_rx_ampdu* rap,
+	int baparamset, int batimeout, int baseqctl)
+{
+	struct mt7921_softc* sc = ni->ni_ic->ic_softc;
+	int tid = _IEEE80211_MASKSHIFT(baparamset, IEEE80211_BAPS_TID);
+	int error;
+
+	error = sc->sc_ampdu_rx_start(ni, rap, baparamset, batimeout, baseqctl);
+	if (error != 0 || !sc->sc_sta_added || tid >= WME_NUM_TID
+		|| !IEEE80211_ADDR_EQ(ni->ni_macaddr, sc->sc_bssid))
+		return error;
+
+	if (mt7921_mcu_rx_ba(sc, ni->ni_macaddr, tid, rap->rxa_start,
+			rap->rxa_wnd, true) == 0) {
+		MT7921_LOCK(sc);
+		sc->sc_ba_active |= 1 << tid;
+		sc->sc_ba_stop &= ~(1 << tid);
+		MT7921_UNLOCK(sc);
+		device_printf(sc->sc_dev, "block ack on for TID %d (window %d)\n",
+			tid, rap->rxa_wnd);
+	} else
+		device_printf(sc->sc_dev, "block ack setup for TID %d failed\n", tid);
+	return 0;
+}
+
+
+/*
+ * The session ended (DELBA, or the node goes away). This can be called
+ * with net80211 locks held, so the firmware is told from a task.
+ */
+static void
+mt7921_ampdu_rx_stop(struct ieee80211_node* ni, struct ieee80211_rx_ampdu* rap)
+{
+	struct mt7921_softc* sc = ni->ni_ic->ic_softc;
+	int tid = rap - &ni->ni_rx_ampdu[0];
+
+	sc->sc_ampdu_rx_stop(ni, rap);
+
+	if (tid < 0 || tid >= WME_NUM_TID
+		|| !IEEE80211_ADDR_EQ(ni->ni_macaddr, sc->sc_bssid))
+		return;
+	MT7921_LOCK(sc);
+	if ((sc->sc_ba_active & (1 << tid)) != 0) {
+		sc->sc_ba_active &= ~(1 << tid);
+		sc->sc_ba_stop |= 1 << tid;
+		taskqueue_enqueue(sc->sc_ic.ic_tq, &sc->sc_ba_task);
+	}
+	MT7921_UNLOCK(sc);
+}
+
+
+static void
+mt7921_ba_task(void* arg, int pending)
+{
+	struct mt7921_softc* sc = arg;
+	uint8_t addr[6];
+	uint16_t stop;
+	bool added;
+	int tid;
+
+	MT7921_LOCK(sc);
+	stop = sc->sc_ba_stop;
+	sc->sc_ba_stop = 0;
+	added = sc->sc_sta_added;
+	IEEE80211_ADDR_COPY(addr, sc->sc_bssid);
+	MT7921_UNLOCK(sc);
+
+	if (!added)
+		return;
+	for (tid = 0; tid < WME_NUM_TID; tid++) {
+		if ((stop & (1 << tid)) == 0)
+			continue;
+		(void)mt7921_mcu_rx_ba(sc, addr, tid, 0, 0, false);
+		device_printf(sc->sc_dev, "block ack off for TID %d\n", tid);
+	}
+}
+
+
+/* Port of mt7921_conf_tx() + mt7921_mcu_set_tx(): the AP's EDCA values. */
+static void
+mt7921_wme_apply(struct mt7921_softc* sc)
+{
+	struct ieee80211com* ic = &sc->sc_ic;
+	struct chanAccParams chp;
+	struct mt7921_edca edca[4];
+	/* mt76 order is BK, BE, VI, VO; net80211's is BE, BK, VI, VO. */
+	static const int to_ac[4] = { WME_AC_BK, WME_AC_BE, WME_AC_VI, WME_AC_VO };
+	int i;
+
+	if (!sc->sc_can_tx || !sc->sc_sta_added)
+		return;
+
+	ieee80211_wme_ic_getparams(ic, &chp);
+	memset(edca, 0, sizeof(edca));
+	for (i = 0; i < 4; i++) {
+		const struct wmeParams* p = &chp.cap_wmeParams[to_ac[i]];
+		edca[i].aifs = p->wmep_aifsn;
+		/* Upstream passes mac80211's plain values (2^n - 1). */
+		edca[i].cw_min = (1U << p->wmep_logcwmin) - 1;
+		edca[i].cw_max = (1U << p->wmep_logcwmax) - 1;
+		edca[i].txop = p->wmep_txopLimit;
+	}
+	if (mt7921_mcu_set_edca(sc, edca, true) != 0)
+		device_printf(sc->sc_dev, "EDCA update failed\n");
+}
+
+
+static void
+mt7921_wme_task(void* arg, int pending)
+{
+	mt7921_wme_apply(arg);
+}
+
+
+/* net80211 calls this with its lock held: send the command from a task. */
+static int
+mt7921_wme_update(struct ieee80211com* ic)
+{
+	struct mt7921_softc* sc = ic->ic_softc;
+
+	taskqueue_enqueue(ic->ic_tq, &sc->sc_wme_task);
+	return 0;
 }
 
 
@@ -796,6 +1007,10 @@ mt7921_vap_create(struct ieee80211com* ic, const char name[IFNAMSIZ],
 
 	/* The firmware scans; net80211 only collects results. */
 	vap->iv_flags_ext |= IEEE80211_FEXT_SCAN_OFFLOAD;
+
+	/* What mt76 advertises: 64 KB A-MPDUs, 4 us MPDU spacing. */
+	vap->iv_ampdu_rxmax = IEEE80211_HTCAP_MAXRXAMPDU_64K;
+	vap->iv_ampdu_density = IEEE80211_HTCAP_MPDUDENSITY_4;
 
 	mvp->mv_newstate = vap->iv_newstate;
 	vap->iv_newstate = mt7921_newstate;
@@ -893,6 +1108,22 @@ mt7921_net_attach(struct mt7921_softc* sc)
 		| IEEE80211_C_WPA		/* software crypto in net80211 for now */
 		| IEEE80211_C_SHPREAMBLE
 		| IEEE80211_C_SHSLOT;
+	if (sc->sc_ht) {
+		ic->ic_caps |= IEEE80211_C_WME;
+		/*
+		 * Two streams, 20 MHz. No TX aggregation yet (net80211 would
+		 * need the firmware's TX block-ack commands), and no A-MSDU
+		 * inside A-MPDU, so the AP sends at most a 3839-byte A-MSDU.
+		 */
+		ic->ic_htcaps = IEEE80211_HTC_HT
+			| IEEE80211_HTCAP_SMPS_OFF
+			| IEEE80211_HTCAP_SHORTGI20
+			| IEEE80211_HTCAP_LDPC
+			| IEEE80211_HTCAP_TXSTBC
+			| IEEE80211_HTCAP_RXSTBC_1STREAM;
+		ic->ic_txstream = 2;
+		ic->ic_rxstream = 2;
+	}
 	IEEE80211_ADDR_COPY(ic->ic_macaddr, sc->sc_macaddr);
 
 	mt7921_getradiocaps(ic, IEEE80211_CHAN_MAX, &ic->ic_nchans,
@@ -901,6 +1132,8 @@ mt7921_net_attach(struct mt7921_softc* sc)
 	mbufq_init(&sc->sc_rxq, 256);
 	TASK_INIT(&sc->sc_rx_task, 0, mt7921_rx_task, sc);
 	TASK_INIT(&sc->sc_scan_done_task, 0, mt7921_scan_done_task, sc);
+	TASK_INIT(&sc->sc_ba_task, 0, mt7921_ba_task, sc);
+	TASK_INIT(&sc->sc_wme_task, 0, mt7921_wme_task, sc);
 	callout_init_mtx(&sc->sc_scan_to, &sc->sc_mtx, 0);
 
 	ieee80211_ifattach(ic);
@@ -917,6 +1150,13 @@ mt7921_net_attach(struct mt7921_softc* sc)
 	/* Set after ieee80211_ifattach(), which installs the defaults. */
 	ic->ic_scan_curchan = mt7921_scan_curchan;
 	ic->ic_scan_mindwell = mt7921_scan_mindwell;
+	if (sc->sc_ht) {
+		ic->ic_wme.wme_update = mt7921_wme_update;
+		sc->sc_ampdu_rx_start = ic->ic_ampdu_rx_start;
+		sc->sc_ampdu_rx_stop = ic->ic_ampdu_rx_stop;
+		ic->ic_ampdu_rx_start = mt7921_ampdu_rx_start;
+		ic->ic_ampdu_rx_stop = mt7921_ampdu_rx_stop;
+	}
 
 	sc->sc_ic_attached = true;
 	device_printf(sc->sc_dev, "registered with net80211 (%d channels)\n",
@@ -937,6 +1177,8 @@ mt7921_net_detach(struct mt7921_softc* sc)
 	callout_drain(&sc->sc_scan_to);
 	taskqueue_drain(ic->ic_tq, &sc->sc_rx_task);
 	taskqueue_drain(ic->ic_tq, &sc->sc_scan_done_task);
+	taskqueue_drain(ic->ic_tq, &sc->sc_ba_task);
+	taskqueue_drain(ic->ic_tq, &sc->sc_wme_task);
 
 	MT7921_LOCK(sc);
 	sc->sc_ic_attached = false;

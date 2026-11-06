@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- 802.11n (HT20, two streams): HT station and WTBL records, receive
+  block-ack sessions, WME/QoS with the AP's EDCA parameters, per-AC transmit
+  queues, larger receive buffers for A-MSDUs. `ht off` restores legacy rates.
+- 5 GHz DFS channels 52–144, passive (no transmitting before an AP is heard).
+- Reboot safety: the driver watches for Haiku's shutdown and stops DMA and
+  bus mastering before the machine restarts.
+- `tools/mt7921dev.sh ht on|off`; `stage` no longer overwrites other settings.
+
 ## 0.1.0 — 2026-11-05
 
 First working version, tested on an AMD RZ616 (MT7922).

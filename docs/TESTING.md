@@ -34,9 +34,14 @@ The driver defends against this:
 - Before enabling bus mastering it stops any leftover DMA and logs
   `stopped DMA left running by a previous run` if it found some.
 - While the interface is down, DMA is paused and bus mastering is off.
+- When Haiku starts shutting down or restarting, the driver stops DMA and
+  turns bus mastering off, and logs `system shutting down: DMA stopped, bus
+  mastering off`. After a restart, look for that line in `/var/log/syslog.1`
+  (the previous boot), and for **no** `stopped DMA left running` line in the
+  new boot.
 
-Until this is solved properly, **end test sessions with a full shutdown** and
-cut power for ~30 seconds.
+A full shutdown is still the safest way to end a session with an untested
+build.
 
 ## Recovering from a bad build
 
@@ -47,7 +52,7 @@ cut power for ~30 seconds.
 ## What a good stage-6 log looks like
 
 ```
-bring-up stage 6 of 6
+bring-up stage 6 of 6, 802.11n on
 PCI command at load: 0x.... (bus master off)
 ASIC revision: 79220010 (chip 0x7922 rev 0x10)
 ROM patch loaded
@@ -67,7 +72,8 @@ joining xx:xx:... on channel N: channel granted
 tx: fc b000 ...  /  tx done: token 0 status 0     (authentication)
 tx: fc 0000 ...  /  tx done: token 1 status 0     (association request)
 net80211 state ASSOC -> RUN
-associated with xx:xx:... (AID n)
+associated with xx:xx:... (AID n, 802.11n, QoS)
+block ack on for TID 0 (window 64)                (the AP starts aggregation)
 tx: fc 0801 ...                                   (WPA handshake / data)
 tx: fc 0841 ...                                   (encrypted data)
 ```

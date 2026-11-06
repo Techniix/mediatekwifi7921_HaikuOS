@@ -40,6 +40,9 @@
 #define MT7921_RX_MCU_NDESC	8	/* same as upstream */
 #define MT7921_RX_WA_NDESC	64
 #define MT7921_RX_DATA_NDESC	32
+/* With 802.11n: room for A-MPDU bursts and a whole 3839-byte A-MSDU. */
+#define MT7921_RX_DATA_HT_NDESC	128
+#define MT7921_RX_DATA_HT_BUF_SIZE 4096
 
 #define MT7921_TX_BUF_SIZE	4096	/* largest FW_SCATTER chunk */
 #define MT7921_RX_BUF_SIZE	2048	/* MT_RX_BUF_SIZE */
@@ -520,8 +523,9 @@ mt7921_dma_init(struct mt7921_softc* sc)
 
 	/* RX data (ring 2). */
 	error = mt7921_ring_alloc(sc, &sc->sc_rx_data, "rx-data",
-		MT_RX_DATA_RING_BASE, 0, MT7921_RX_DATA_NDESC,
-		MT7921_RX_BUF_SIZE, true);
+		MT_RX_DATA_RING_BASE, 0,
+		sc->sc_ht ? MT7921_RX_DATA_HT_NDESC : MT7921_RX_DATA_NDESC,
+		sc->sc_ht ? MT7921_RX_DATA_HT_BUF_SIZE : MT7921_RX_BUF_SIZE, true);
 	if (error != 0)
 		goto fail;
 

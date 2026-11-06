@@ -93,3 +93,32 @@ mt7921_haiku_get_stage(void)
 	}
 	return stage;
 }
+
+
+/* "ht off" in the same settings file turns 802.11n off (legacy rates). */
+bool
+mt7921_haiku_ht_enabled(void)
+{
+	bool enabled = true;
+	void* handle = load_driver_settings("mediatekwifi7921");
+
+	if (handle != NULL) {
+		enabled = get_driver_boolean_parameter(handle, "ht", true, true);
+		unload_driver_settings(handle);
+	}
+	return enabled;
+}
+
+
+/*
+ * Set by the kernel's system_shutdown() before teams are ended and disks
+ * synced (headers/private/kernel/kernel.h). There is no driver shutdown
+ * hook, so the driver polls this to quiesce the chip before a reboot.
+ */
+extern bool gKernelShutdown;
+
+bool
+mt7921_haiku_shutting_down(void)
+{
+	return gKernelShutdown;
+}
