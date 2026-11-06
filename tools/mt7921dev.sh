@@ -103,8 +103,8 @@ firmware)
 	;;
 log)
 	n=${2:-60}
-	{ [ -f /var/log/syslog.1 ] && grep -ih mt7921 /var/log/syslog.1 || true
-	  grep -ih mt7921 /var/log/syslog || true; } | tail -n "$n"
+	{ [ -f /var/log/syslog.1 ] && grep -aih mt7921 /var/log/syslog.1 || true
+	  grep -aih mt7921 /var/log/syslog || true; } | tail -n "$n"
 	;;
 status)
 	[ -f "$BIN_DIR/$NAME" ] && ls -l "$BIN_DIR/$NAME" || echo "not installed"
