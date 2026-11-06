@@ -152,6 +152,9 @@ struct mt7921_softc {
 	/* DMA rings (milestone 2). */
 	bool			sc_dma_up;
 	bool			sc_dma_paused;	/* engine off + no bus mastering */
+	struct callout		sc_shutdown_co;	/* watches gKernelShutdown */
+	bool			sc_shutdown_armed;
+	bool			sc_shutting_down;
 	struct mt7921_ring	sc_tx_data0;
 	struct mt7921_ring	sc_tx_fwdl;
 	struct mt7921_ring	sc_tx_wm;
@@ -278,5 +281,6 @@ void		mt7921_hw_resume(struct mt7921_softc*);
 
 /* glue.c */
 int		mt7921_haiku_get_stage(void);
+bool		mt7921_haiku_shutting_down(void);
 
 #endif /* _IF_MT7921VAR_H_ */

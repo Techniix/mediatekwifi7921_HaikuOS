@@ -381,10 +381,11 @@ mt7921_intr(void* arg)
 
 	/* MCU replies/events and received frames, from all RX rings. */
 	mt7921_mcu_poll_locked(sc);
-	MT7921_UNLOCK(sc);
 
+	/* Under the lock, so the shutdown watcher's mask-off always wins. */
 	if (sc->sc_intr_ready)
 		mt7921_wr(sc, MT_WFDMA0_HOST_INT_ENA, sc->sc_irqmask);
+	MT7921_UNLOCK(sc);
 }
 
 
@@ -448,10 +449,9 @@ mt7921_intr_setup(struct mt7921_softc* sc)
  * pause DMA and drop bus mastering whenever it goes down (and right after
  * attach), resume when net80211 brings it up.
  */
-void
-mt7921_hw_pause(struct mt7921_softc* sc)
+static void
+mt7921_hw_pause_locked(struct mt7921_softc* sc)
 {
-	MT7921_LOCK(sc);
 	if (sc->sc_dma_up && !sc->sc_dma_paused) {
 		mt7921_clear(sc, MT_WFDMA0_GLO_CFG,
 			MT_WFDMA0_GLO_CFG_TX_DMA_EN | MT_WFDMA0_GLO_CFG_RX_DMA_EN);
@@ -463,6 +463,14 @@ mt7921_hw_pause(struct mt7921_softc* sc)
 		sc->sc_dma_paused = true;
 		device_printf(sc->sc_dev, "DMA paused, bus mastering off\n");
 	}
+}
+
+
+void
+mt7921_hw_pause(struct mt7921_softc* sc)
+{
+	MT7921_LOCK(sc);
+	mt7921_hw_pause_locked(sc);
 	MT7921_UNLOCK(sc);
 }
 
@@ -471,7 +479,7 @@ void
 mt7921_hw_resume(struct mt7921_softc* sc)
 {
 	MT7921_LOCK(sc);
-	if (sc->sc_dma_up && sc->sc_dma_paused) {
+	if (sc->sc_dma_up && sc->sc_dma_paused && !sc->sc_shutting_down) {
 		pci_enable_busmaster(sc->sc_dev);
 		mt7921_set(sc, MT_WFDMA0_GLO_CFG,
 			MT_WFDMA0_GLO_CFG_TX_DMA_EN | MT_WFDMA0_GLO_CFG_RX_DMA_EN);
@@ -479,6 +487,39 @@ mt7921_hw_resume(struct mt7921_softc* sc)
 		device_printf(sc->sc_dev, "DMA resumed\n");
 	}
 	MT7921_UNLOCK(sc);
+}
+
+
+/*
+ * Shutdown watcher. Haiku calls no driver hook on shutdown or restart, but
+ * system_shutdown() sets gKernelShutdown before it ends the user teams and
+ * syncs the disks, and only then resets the machine. Polling it lets us
+ * stop the chip's DMA and revoke bus mastering in that window, so nothing
+ * stays live across a warm reboot. Runs with sc_mtx held.
+ */
+#define MT7921_SHUTDOWN_POLL_MS	50
+
+static void
+mt7921_shutdown_watch(void* arg)
+{
+	struct mt7921_softc* sc = arg;
+
+	if (!mt7921_haiku_shutting_down()) {
+		callout_reset(&sc->sc_shutdown_co, MT7921_SHUTDOWN_POLL_MS * hz / 1000,
+			mt7921_shutdown_watch, sc);
+		return;
+	}
+
+	sc->sc_shutting_down = true;
+	sc->sc_intr_ready = false;
+	if (sc->sc_mem != NULL) {
+		mt7921_wr(sc, MT_WFDMA0_HOST_INT_ENA, 0);
+		mt7921_wr(sc, MT_PCIE_MAC_INT_ENABLE, 0);
+	}
+	mt7921_hw_pause_locked(sc);
+	mt7921_disable_busmaster(sc->sc_dev);
+	device_printf(sc->sc_dev, "system shutting down: DMA stopped, bus "
+		"mastering off\n");
 }
 
 
@@ -649,6 +690,13 @@ mt7921_attach(device_t dev)
 		mt7921_intr_setup(sc);
 		/* Until the interface is brought up, the chip gets no memory access. */
 		mt7921_hw_pause(sc);
+
+		callout_init_mtx(&sc->sc_shutdown_co, &sc->sc_mtx, 0);
+		sc->sc_shutdown_armed = true;
+		MT7921_LOCK(sc);
+		callout_reset(&sc->sc_shutdown_co, MT7921_SHUTDOWN_POLL_MS * hz / 1000,
+			mt7921_shutdown_watch, sc);
+		MT7921_UNLOCK(sc);
 		device_printf(dev, "attached; Haiku will now create the WiFi "
 			"interface\n");
 		return 0;
@@ -692,6 +740,10 @@ mt7921_detach(device_t dev)
 	struct mt7921_softc* sc = device_get_softc(dev);
 
 	/* Haiku's stop_wlan() has already deleted the VAP at this point. */
+	if (sc->sc_shutdown_armed) {
+		callout_drain(&sc->sc_shutdown_co);
+		sc->sc_shutdown_armed = false;
+	}
 	mt7921_intr_teardown(sc);
 	mt7921_net_detach(sc);
 
