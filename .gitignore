@@ -1,0 +1,5 @@
+# Build output and firmware never belong in this repository.
+objects/
+*.o
+*.bin
+.DS_Store
